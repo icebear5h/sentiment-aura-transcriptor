@@ -1,0 +1,93 @@
+// Prisma schema for NextAuth + Sentiment Aura
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// NextAuth Models
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts      Account[]
+  sessions      Session[]
+
+  @@map("users")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// Future: Add Conversation model for multi-session recordings
+// model Conversation {
+//   id          String   @id @default(cuid())
+//   userId      String
+//   title       String
+//   subject     String?
+//   createdAt   DateTime @default(now())
+//   updatedAt   DateTime @updatedAt
+//   
+//   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+//   segments    ConversationSegment[]
+// }
+//
+// model ConversationSegment {
+//   id              String   @id @default(cuid())
+//   conversationId  String
+//   transcript      String   @db.Text
+//   sentiment       Float
+//   sentimentType   String
+//   keywords        String[]
+//   confidence      Float
+//   duration        Int?
+//   createdAt       DateTime @default(now())
+//   
+//   conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+// }
