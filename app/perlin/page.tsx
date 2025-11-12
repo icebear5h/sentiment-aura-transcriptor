@@ -1015,19 +1015,6 @@ export default function VisualRecordPage() {
             <Controls isRecording={isRecording} onToggle={handleStartStop} />
           </div>
           
-          {/* Parameter Description Banner */}
-          {parameterDescription && (
-            <div className="pointer-events-auto animate-in slide-in-from-top-5 duration-300">
-              <div className="bg-purple-500/20 border border-purple-400/50 rounded-lg p-4 backdrop-blur-xl">
-                <div className="flex items-start gap-3">
-                  <div className="text-purple-300 text-xs font-mono leading-relaxed">
-                    <div className="font-bold mb-1 text-purple-200">🤖 Groq Parameter Translation:</div>
-                    {parameterDescription}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
 
           {/* Error Banner */}
           {error && (

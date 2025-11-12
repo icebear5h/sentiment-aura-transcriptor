@@ -21,7 +21,7 @@ export default function LoginPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           <Button
-            onClick={() => signIn("google", { callbackUrl: "/record" })}
+            onClick={() => signIn("google", { callbackUrl: "/perlin" })}
             className="w-full bg-white hover:bg-white/90 text-black font-medium h-12"
           >
             <svg className="w-5 h-5 mr-3" viewBox="0 0 24 24">
@@ -43,14 +43,6 @@ export default function LoginPage() {
               />
             </svg>
             Continue with Google
-          </Button>
-
-          <Button
-            onClick={() => signIn("github", { callbackUrl: "/record" })}
-            className="w-full bg-white/10 hover:bg-white/20 text-white border border-white/20 font-medium h-12"
-          >
-            <Github className="w-5 h-5 mr-3" />
-            Continue with GitHub
           </Button>
 
           <div className="relative">
