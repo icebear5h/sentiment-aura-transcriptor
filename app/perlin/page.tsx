@@ -84,7 +84,13 @@ export default function VisualRecordPage() {
   const backendThrottleRef = useRef<NodeJS.Timeout | null>(null)
   const pendingTranscriptRef = useRef<string>("")
   const groqThrottleRef = useRef<NodeJS.Timeout | null>(null)
+  const lastGroqCallRef = useRef<number>(0)
   const lastProcessedKeywordCount = useRef<number>(0)
+  const groqTrailingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const groqInFlightRef = useRef(false)
+  const destroyedRef = useRef(false)
+  const latestKeywordsRef = useRef<string[]>([])
+  const latestTranscriptRef = useRef<string[]>([])
   const simulationIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const pulseTimeRef = useRef(0)
   const clarityBaseRef = useRef(0.5)
@@ -402,9 +408,22 @@ export default function VisualRecordPage() {
     return () => clearInterval(decayInterval)
   }, [])
 
+  useEffect(() => {
+    latestKeywordsRef.current = keywords
+  }, [keywords])
+
+  useEffect(() => {
+    latestTranscriptRef.current = transcript
+  }, [transcript])
+
   // CRITICAL: Master cleanup when component unmounts (navigating away)
   useEffect(() => {
     return () => {
+      destroyedRef.current = true
+      if (groqTrailingTimeoutRef.current) {
+        clearTimeout(groqTrailingTimeoutRef.current)
+        groqTrailingTimeoutRef.current = null
+      }
       console.log('🧹 Visual Record page unmounting - cleaning up all resources')
       
       // Stop recording if active
@@ -448,8 +467,6 @@ export default function VisualRecordPage() {
   // Call Groq to translate keywords to parameters
   // Backend extracts emotional/qualia keywords → Send NEW keywords to Frontend Groq for parameter translation
   useEffect(() => {
-    let isMounted = true // Track if component is still mounted
-    
     console.log(`🔄 Keywords effect triggered. Total keywords: ${keywords.length}, Last processed: ${lastProcessedKeywordCount.current}`)
     
     if (keywords.length === 0) {
@@ -458,50 +475,44 @@ export default function VisualRecordPage() {
       return
     }
 
-    // Check if there are new keywords since last processing
     const newKeywordCount = keywords.length - lastProcessedKeywordCount.current
     console.log(`📈 New keyword count: ${newKeywordCount}`)
-    
     if (newKeywordCount === 0) {
       console.log('⏸️ No new keywords since last processing')
-      return // No new keywords
+      return
     }
 
-    // Process immediately when new keywords arrive
-    const processKeywords = async () => {
-      // Get only the NEW keywords since last processing
-      const newKeywords = keywords.slice(lastProcessedKeywordCount.current)
-      const uniqueNewKeywords = Array.from(new Set(newKeywords))
-      
-      console.log(`📥 New keywords (${uniqueNewKeywords.length}):`, uniqueNewKeywords)
-      
-      if (uniqueNewKeywords.length < 1) {
-        return // Need at least 1 new keyword to process
-      }
+    const COOLDOWN_MS = 10000
+    const now = Date.now()
+    const cooldownRemaining = COOLDOWN_MS - (now - lastGroqCallRef.current)
 
+    const processGroq = async () => {
+      if (groqInFlightRef.current) return
+      groqInFlightRef.current = true
       try {
+        const newKeywords = latestKeywordsRef.current.slice(lastProcessedKeywordCount.current)
+        const uniqueNewKeywords = Array.from(new Set(newKeywords))
+        console.log(`📥 New keywords (${uniqueNewKeywords.length}):`, uniqueNewKeywords)
+        if (uniqueNewKeywords.length < 1) return
+
         console.log('🤖 Translating NEW keywords to parameters:', uniqueNewKeywords)
-        // Pass the full transcript as context for better understanding
-        const fullTranscriptText = transcript.join(' ')
+        const fullTranscriptText = latestTranscriptRef.current.join(' ')
         const mapping = await translateKeywordsToParametersWithRetry(uniqueNewKeywords, fullTranscriptText)
-        
-        // Mark these keywords as processed ONLY AFTER successful Groq call
-        lastProcessedKeywordCount.current = keywords.length
-        
-        // Check if component is still mounted before updating state
-        if (!isMounted) {
+
+        lastProcessedKeywordCount.current = latestKeywordsRef.current.length
+
+        if (destroyedRef.current) {
           console.log('⚠️ Component unmounted, skipping state updates')
           return
         }
-        
-        // Groq response logging happens in groq-client.ts
-        
-        // Update base values for qualitative pulsing (matching three-fiber-playground approach)
+
+        lastGroqCallRef.current = Date.now()
+
         clarityBaseRef.current = mapping.clarity ?? 0.7
         intensityBaseRef.current = mapping.intensity ?? 0.6
         coherenceBaseRef.current = mapping.coherence ?? 0.7
         pulsingAmplitudeRef.current = mapping.pulse ?? mapping.pulsing ?? 0.75
-        
+
         console.log('🌊 Qualitative pulsing updated:', {
           pulse: mapping.pulse,
           pulsing: mapping.pulsing,
@@ -510,8 +521,7 @@ export default function VisualRecordPage() {
           intensityBase: mapping.intensity,
           coherenceBase: mapping.coherence
         })
-        
-        // Trigger color transition
+
         console.log('🔍 Checking color change:', {
           newPrimary: mapping.primaryColor,
           targetPrimary: targetPrimaryColorRef.current,
@@ -520,20 +530,14 @@ export default function VisualRecordPage() {
           isDifferent: mapping.primaryColor !== targetPrimaryColorRef.current || 
                       mapping.secondaryColor !== targetSecondaryColorRef.current
         })
-        
+
         if (mapping.primaryColor !== targetPrimaryColorRef.current || 
             mapping.secondaryColor !== targetSecondaryColorRef.current) {
-          // Store current colors as starting point (from actual params state)
           currentPrimaryColorRef.current = params.primaryColor
           currentSecondaryColorRef.current = params.secondaryColor
-          
-          // Set new target colors
           targetPrimaryColorRef.current = mapping.primaryColor
           targetSecondaryColorRef.current = mapping.secondaryColor
-          
-          // Reset transition progress
           colorTransitionProgressRef.current = 0.0
-          
           console.log('🎨 Starting color transition:', {
             from: [currentPrimaryColorRef.current, currentSecondaryColorRef.current],
             to: [targetPrimaryColorRef.current, targetSecondaryColorRef.current],
@@ -543,21 +547,14 @@ export default function VisualRecordPage() {
         } else {
           console.log('⏭️ Colors unchanged, skipping transition')
         }
-        
-        // Trigger particle count and size transitions if changed
+
         if (mapping.particleCount !== targetParticleCountRef.current || 
             Math.abs(mapping.particleSize - targetParticleSizeRef.current) > 0.001) {
-          // Store current values as starting point
           currentParticleCountRef.current = params.particleCount
           currentParticleSizeRef.current = params.particleSize
-          
-          // Set new target values
           targetParticleCountRef.current = mapping.particleCount
           targetParticleSizeRef.current = mapping.particleSize
-          
-          // Reset transition progress
           particleTransitionProgressRef.current = 0.0
-          
           console.log('🔢 Starting particle transition:', {
             fromCount: currentParticleCountRef.current,
             toCount: targetParticleCountRef.current,
@@ -569,13 +566,9 @@ export default function VisualRecordPage() {
         } else {
           console.log('⏭️ Particles unchanged, skipping transition')
         }
-        
-        // Apply objective prompt parameters immediately
-        // Note: clarity, intensity, coherence are handled by pulsing animation
-        // Colors, particleCount, and particleSize are handled by animation loop transitions
+
         setParams(prev => ({
           ...prev,
-          // Direct simulation parameters from objective prompt (excluding transitioned values)
           brightness: mapping.brightness,
           speed: mapping.speed,
           timeScale: mapping.timeScale,
@@ -585,18 +578,14 @@ export default function VisualRecordPage() {
           noiseStrength: mapping.noiseStrength,
           flowDensity: mapping.flowDensity,
           turbulence: mapping.turbulence,
-          
-          // Static qualitative parameters (not pulsed)
           flowPattern: mapping.flowPattern as FlowPattern,
           stability: mapping.stability ?? 0.5,
           sharpness: mapping.sharpness ?? 0.5,
           quantity: mapping.quantity ?? 0.5,
           opacity: mapping.opacity ?? 0.8,
           pulsing: mapping.pulsing ?? 0.75,
-
         }))
-        
-        // Force immediate visual feedback by starting the first frame of color transition
+
         if (colorTransitionProgressRef.current === 0.0) {
           setParams(prev => ({
             ...prev,
@@ -608,25 +597,32 @@ export default function VisualRecordPage() {
             secondary: currentSecondaryColorRef.current
           })
         }
-        
-        // Create human-readable description
+
         const pulsingValue = mapping.pulse ?? mapping.pulsing ?? 0.75
         const pulsingLevel = pulsingValue < 0.3 ? 'minimal' : pulsingValue < 0.6 ? 'moderate' : 'strong'
         const description = `Speed: ${mapping.speed.toFixed(1)} | Pulsing: ${pulsingLevel} (${(pulsingValue * 100).toFixed(0)}%) | Turbulence: ${mapping.turbulence.toFixed(2)} | NoiseStrength: ${mapping.noiseStrength.toFixed(2)} | Pattern: ${mapping.flowPattern ?? 'free'} | Colors: ${mapping.primaryColor} → ${mapping.secondaryColor}`
         setParameterDescription(description)
-        
+
         console.log('✅ Applied Groq parameters:', mapping)
       } catch (err) {
         console.error('❌ Failed to translate keywords (using fallback):', err)
-        // Don't show error to user since we have fallback parameters
+      } finally {
+        groqInFlightRef.current = false
       }
     }
 
-    processKeywords()
-    
-    // Cleanup: mark component as unmounted
-    return () => {
-      isMounted = false
+    if (cooldownRemaining <= 0) {
+      if (groqTrailingTimeoutRef.current) {
+        clearTimeout(groqTrailingTimeoutRef.current)
+        groqTrailingTimeoutRef.current = null
+      }
+      processGroq()
+    } else if (!groqTrailingTimeoutRef.current) {
+      console.log(`⏸️ Cooldown active (${(cooldownRemaining / 1000).toFixed(1)}s remaining). Will run at end of window.`)
+      groqTrailingTimeoutRef.current = setTimeout(() => {
+        groqTrailingTimeoutRef.current = null
+        processGroq()
+      }, cooldownRemaining + 100)
     }
   }, [keywords])
 
@@ -956,6 +952,7 @@ export default function VisualRecordPage() {
       setSentimentType("neutral")
       setError(null)
       processingQueueRef.current.clear()
+      lastGroqCallRef.current = 0
       lastProcessedKeywordCount.current = 0
       
       try {
@@ -1014,8 +1011,6 @@ export default function VisualRecordPage() {
             </div>
             <Controls isRecording={isRecording} onToggle={handleStartStop} />
           </div>
-          
-
           {/* Error Banner */}
           {error && (
             <div className="pointer-events-auto animate-in slide-in-from-top-5 duration-300">

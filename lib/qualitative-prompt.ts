@@ -224,7 +224,7 @@ flowDensity (0.01-0.80):
 turbulence (0.0-0.5):
 - Particle wiggle/wobble intensity (independent of base speed)
 - only have a turblence of a 0.4 + for high activation emotions
-- for everything else
+- for everything else should be < 0.1
 COLOR PALETTE GUIDANCE (primaryColor and secondaryColor):
 
 Create beautiful, mesmerizing color combinations that match the emotional quality.
