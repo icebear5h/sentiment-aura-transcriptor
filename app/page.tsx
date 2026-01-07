@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
-import { Brain, Mic, Sparkles, Lock } from "lucide-react"
+import { Brain, Mic, Sparkles } from "lucide-react"
 
 export default function HomePage() {
   return (
@@ -17,7 +17,7 @@ export default function HomePage() {
           <div className="flex items-center justify-center gap-3 mb-8">
             <Brain className="w-12 h-12 text-cyan-400" />
             <h1 className="text-5xl font-bold bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-transparent">
-              Memory Machine
+              Sentiment Aura
             </h1>
           </div>
 
@@ -33,13 +33,13 @@ export default function HomePage() {
 
           {/* CTA Buttons */}
           <div className="flex items-center justify-center gap-4 pt-8">
-            <Link href="/auth/login">
+            <Link href="/perlin">
               <Button size="lg" className="bg-cyan-500 hover:bg-cyan-600 text-white px-8 py-6 text-lg">
-                <Lock className="w-5 h-5 mr-2" />
-                Sign In
+                <Sparkles className="w-5 h-5 mr-2" />
+                Open Visualizer
               </Button>
             </Link>
-            <Link href="/auth/register">
+            <Link href="/perlin">
               <Button
                 size="lg"
                 variant="outline"

@@ -1,13 +1,29 @@
 "use client"
 
+import { useEffect, useState } from "react"
 import { motion, AnimatePresence, Variants } from "framer-motion"
 import { cn } from "@/lib/utils"
+import { keywordsStore } from "@/lib/keywords-store"
 
 interface KeywordsDisplayProps {
-  keywords: string[]
+  keywords?: string[] // Now optional - we subscribe to store
 }
 
-export function KeywordsDisplay({ keywords }: KeywordsDisplayProps) {
+export function KeywordsDisplay({ keywords: propKeywords }: KeywordsDisplayProps) {
+  const [storeKeywords, setStoreKeywords] = useState<string[]>([])
+  
+  // Subscribe to the keywords store
+  useEffect(() => {
+    const unsubscribe = keywordsStore.subscribe((keywords) => {
+      console.log('KeywordsDisplay received from store:', keywords.length, 'keywords')
+      setStoreKeywords(keywords)
+    })
+    
+    return unsubscribe
+  }, [])
+  
+  // Use store keywords, falling back to props if provided
+  const keywords = storeKeywords.length > 0 ? storeKeywords : (propKeywords || [])
   const uniqueKeywords = Array.from(new Set(keywords))
 
   const containerVariants = {
@@ -59,6 +75,9 @@ export function KeywordsDisplay({ keywords }: KeywordsDisplayProps) {
                   key={`${keyword}-${index}`}
                   layout
                   variants={itemVariants}
+                  initial="hidden"
+                  animate="visible"
+                  exit="exit"
                   className={cn(
                     "px-4 py-2 rounded-full inline-block",
                     "bg-gradient-to-r from-cyan-500/20 to-blue-500/20",

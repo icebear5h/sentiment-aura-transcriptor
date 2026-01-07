@@ -66,13 +66,13 @@ export class DeepgramClient {
         // Set up event listeners
         this.connection.on(LiveTranscriptionEvents.Open, () => {
           clearTimeout(timeout)
-          console.log('✅ Deepgram connection opened')
+          console.log('Deepgram connection opened')
           this.onConnectionCallback?.('connected')
           resolve()
         })
 
         this.connection.on(LiveTranscriptionEvents.Close, () => {
-          console.log('🔌 Deepgram connection closed')
+          console.log('Deepgram connection closed')
           this.onConnectionCallback?.('disconnected')
         })
 
@@ -90,7 +90,7 @@ export class DeepgramClient {
 
         this.connection.on(LiveTranscriptionEvents.Error, (error: any) => {
           clearTimeout(timeout)
-          console.error('❌ Deepgram error:', error)
+          console.error('Deepgram error:', error)
           this.onErrorCallback?.(new Error(error.message || 'Deepgram error'))
           reject(error)
         })
@@ -109,7 +109,7 @@ export class DeepgramClient {
 
       this.mediaRecorder.start(250) // Send data every 250ms
 
-      console.log('🎤 Recording started')
+      console.log('Recording started')
     } catch (error) {
       console.error('Failed to start Deepgram:', error)
       this.onErrorCallback?.(error as Error)
@@ -135,7 +135,7 @@ export class DeepgramClient {
     }
 
     this.onConnectionCallback?.('disconnected')
-    console.log('⏹️  Recording stopped')
+    console.log('Recording stopped')
   }
 
   /**

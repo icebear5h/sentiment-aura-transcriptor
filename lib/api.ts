@@ -7,10 +7,41 @@ export interface SentimentResponse {
   sentiment_type: 'positive' | 'negative' | 'neutral'
   keywords: string[]
   confidence: number
+  parameters: ParameterMapping
+}
+
+export interface ParameterMapping {
+  // Direct simulation parameters
+  particleCount: number
+  particleSize: number
+  brightness: number
+  speed: number
+  timeScale: number
+  transitionSpeed: number
+  pulse: number
+  noiseScale: number
+  noiseStrength: number
+  flowDensity: number
+  turbulence: number
+  primaryColor: string
+  secondaryColor: string
+
+  // Qualitative/legacy fields used in the UI
+  clarity: number
+  intensity: number
+  coherence: number
+  stability: number
+  density: number
+  sharpness: number
+  quantity: number
+  opacity: number
+  pulsing: number
+  flowPattern: string
 }
 
 /**
- * Process text and get sentiment analysis
+ * Process text and get sentiment analysis via Next.js API route
+ * (which proxies to FastAPI backend)
  */
 export async function processText(text: string): Promise<SentimentResponse> {
   const controller = new AbortController()

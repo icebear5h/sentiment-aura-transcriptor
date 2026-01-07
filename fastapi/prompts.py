@@ -1,14 +1,55 @@
-/**
- * Qualitative prompt with emotional heuristics and reasoning steps
- * Preserves the original prompt with all emotional interpretation logic
- */
+from textwrap import dedent
 
-export function getKeywordTranslationPrompt(keywords: string[], processedText?: string): string {
-  return `You are a pure JSON function that translates emotion keywords into visualization parameters.
+SENTIMENT_ANALYSIS_PROMPT = """You are a sentiment analysis expert. Analyze the given text and return ONLY a valid JSON object with these exact fields:
+{
+  "sentiment": <float between 0 and 1, where 0 is most negative and 1 is most positive>,
+  "sentiment_type": <"positive", "negative", or "neutral">,
+  "keywords": <array of emotional/qualia descriptors - extract as many as are relevant>,
+  "confidence": <float between 0 and 1>
+}
+
+CRITICAL: All numeric values MUST be valid decimal numbers (e.g., 0.75, 0.9, 0.35). DO NOT write out numbers as words.
+
+IMPORTANT: Keywords MUST be ONLY emotional or qualitative descriptors similar to things in these categories (feel free to get more nuanced and use sophisticated vocabulary when it captures the feeling better):
+
+CALM & PEACE: peaceful, serene, tranquil, gentle, soft, quiet, still, relaxed, calm, soothing, mellow, placid, contemplative, reflective, mindful, centered, balanced, meditative
+
+ENERGY & EXCITEMENT: vibrant, dynamic, energetic, lively, spirited, electric, intense, powerful, active, vigorous, thrilled, exhilarated, animated, enthusiastic, eager, excited, euphoric, ecstatic, elated, jubilant
+
+CHAOS & DISORDER: turbulent, chaotic, frantic, wild, unstable, erratic, volatile, scattered, hectic, confused, disoriented, frenzied, manic, feverish, desperate, panicked
+
+HAPPINESS & JOY: joyful, happy, cheerful, bright, radiant, delighted, blissful, uplifting, pleasant, gleeful, playful, whimsical, lighthearted, mischievous
+
+SADNESS & MELANCHOLY: melancholy, somber, wistful, pensive, subdued, muted, sad, gloomy, heavy, sorrowful, mournful, elegiac, plaintive, doleful, despairing, hopeless, desolate, forlorn
+
+ANXIETY & FEAR: anxious, tense, nervous, uneasy, restless, agitated, jittery, worried, uncertain, uncomfortable, fearful, apprehensive, dreadful, terrified, alarmed, scared
+
+ANGER & AGGRESSION: angry, furious, irate, enraged, livid, wrathful, indignant, hostile, fierce, irritated, annoyed, vexed, aggravated, exasperated, frustrated
+
+MYSTERY & WONDER: mysterious, enigmatic, ethereal, cosmic, dreamy, surreal, otherworldly, mystical, strange, ambiguous, awestruck, amazed, wonderstruck, astonished, dazzled, spellbound
+
+CONFIDENCE & STRENGTH: confident, certain, clear, assured, bold, strong, decisive, firm, resolute, determined, powerful, mighty, formidable, commanding, authoritative
+
+LOVE & WARMTH: warm, cozy, comfortable, inviting, tender, affectionate, loving, caring, nurturing, compassionate, romantic, passionate, ardent, devoted, intimate
+
+COLDNESS & DISTANCE: cold, distant, detached, aloof, remote, impersonal, frigid, icy, indifferent, withdrawn, lonely, isolated, solitary, abandoned
+
+HOPE & OPTIMISM: hopeful, optimistic, promising, encouraging, inspiring, heartening, buoyant
+
+NOSTALGIA & MEMORY: nostalgic, wistful, reminiscent, sentimental, bittersweet, longing, evocative
+
+SOLEMNITY: solemn, grave, serious, austere, dignified, formal, reverent
+
+CURIOSITY: curious, inquisitive, intrigued, fascinated, interested, exploring, wondering
+
+Use expressive vocabulary that captures the FEELING. Do NOT use concrete nouns, verbs, or factual descriptors."""
+
+KEYWORD_TRANSLATION_PROMPT = dedent("""
+You are a pure JSON function that translates emotion keywords into visualization parameters.
 
 INPUT:
-A list of emotion-related keywords: ${keywords.join(", ")}
-${processedText ? `Full processed text context: "${processedText}"` : ''}
+A list of emotion-related keywords: {KEYWORDS}
+{PROCESSED_TEXT}
 
 OUTPUT:
 Return ONLY a single JSON object and NOTHING else.
@@ -74,7 +115,9 @@ INTERNAL REASONING STEPS (do NOT output these, just follow them):
      - intensity in 0.3–0.7
      - speed in 0.4–1.0
      - pulse in 0.2–0.6
-     - flowPattern in ["free", "circular", "spiralOutward", "spiralInward", "breathing"]
+     - clarity in 0.7–1.0 for certainty
+     - low clarify and darker colors for uncertainty
+     - flowPattern in ["free", "circular", "spiralOutward", "spiralInward", "breathing"] (spirals must be slow and very noisy (not purely circular so the noise scale is higher)
    - high activation:
      - intensity in 0.7–1.0
      - speed in 0.9–2.0
@@ -258,257 +301,13 @@ SATURATION & BRIGHTNESS:
 
 MESMERIZING COMBINATIONS (just inspiration):
 - Deep blue → bright cyan: serene to transcendent (#1a4d7a → #33ffff)
-- Purple → magenta: mystical and intense (#6633cc → #ff0099)
-- Dark teal → bright aqua: depth to clarity (#005566 → #66ffcc)
-- Orange → gold → white: warmth ascending (#ff7700 → #ffcc33 → #ffffff)
-- Deep violet → lavender: spiritual depth (#4d0099 → #cc99ff)
-- Navy → electric blue: trust to euphoria (#1a2a4a → #3399ff)
-- Forest green → lime: grounded to vital (#2d5a3d → #99ff66)
-- Burgundy → rose: heavy to light (#660033 → #ff99aa)
+- Deep indigo → electric violet: mystical intensity (#2b1a4d → #9933ff)
+- Teal → emerald: growth, renewal (#007777 → #33cc77)
+- Soft peach → warm gold: optimistic warmth (#ffbb99 → #ffcc33)
+- Crimson → magenta: passionate intensity (#cc0033 → #ff3399)
+- Midnight navy → twilight purple: contemplative depth (#1a2a3a → #443366)
+- Amber → cyan: bold, futuristic energy (#ffaa00 → #00ccff)
 
-COLOR TEMPERATURE:
-- Cool colors (blues, purples, teals): calming, introspective, stable, distant
-- Warm colors (oranges, reds, yellows): energetic, passionate, immediate, vital
-- Neutral (grays, muted tones): balanced, contemplative, uncertain
-
-IMPORTANT: Choose colors that create visual depth and emotional resonance.
-- High intensity emotions: use saturated, contrasting colors
-- Low intensity emotions: use muted, analogous colors
-- High clarity: use distinct, clear colors with good contrast
-- Low clarity: use similar hues or low saturation colors that blend
-
-flowPattern: Spatial movement behavior
-- "free": Natural, unstructured wandering; neutral baseline, works for balanced or ambiguous emotions.
-
-- free noise needs higher noise strength to actually get the particles to move 3+ is good, if you choose free noise, make sure the noise strength is high
-
-- "circular": Cyclical orbit around a center; meditative repetition, reflection, recurring thoughts.
-- "spiralInward": Converging inward; introspection, withdrawal, self-focus, rumination, loneliness.
-- "spiralOutward": Expanding outward; growth, opening up, inspiration, emerging energy.
-- "breathing": Rhythmic in/out expansion; organic, nurturing, alive, soothing or warm connection.
-- "outward": Explosive radial expansion from center; expression, euphoria, celebration, outburst.
-- "inward": Implosive collapse toward center; anxiety, overwhelm, compression, tension.
-
-- for the intenser spirals, make sure th particles are tiny and like 0.002 - 0.007
-- for the spiral patterns add a little more noise scale to prevent completely ciruclar uniform things
-
-ADDITIONAL FLOW / NOISE PATTERNS (only use when they strongly match the emotional quality):
-
-Directional drifts:
-- "left": Horizontal flow toward the left; can suggest looking back, revisiting the past, retreat, or pulling away.
-- "right": Horizontal flow toward the right; forward motion, future orientation, progress, moving on.
-- "up": Upward drift; uplift, hope, aspiration, relief, transcendence, “rising above”.
-- "down": Downward drift; sinking, heaviness, grounding, exhaustion, sadness, descent.
-
-Collective and social dynamics:
-- "flocking": Boid-like group motion; social energy, crowds, belonging, peer influence, group emotion, shared mood.
-
-Attraction / repulsion wells:
-- "attractionWell": Particles drawn toward one or more centers; longing, desire, fascination, focus, craving, obsession, strong pull.
-- "repulsionWell": Particles forced away from a point; rejection, avoidance, disgust, strong boundaries, pushing something away.
-
-Shear and tension:
-- "shearHorizontal": Layers sliding left/right at different speeds; interpersonal tension, cognitive dissonance, competing forces, disagreements.
-- "shearVertical": Layers sliding up/down at different speeds; internal conflict, misalignment between “higher” and “lower” drives, tension between ideals and reality.
-
-Micro-instability and viscosity:
-- "jittery": High-frequency micro-motion, small chaotic jitter; nervousness, overstimulation, caffeine jitter, irritability, restless energy.
-- "viscous": Slow movement with resistance, like moving through thick fluid; stuckness, fatigue, depressive heaviness, trudging, effortful motion.
-
-Bursts, orbits, and mazes:
-- "burst": Sudden radial or directional explosions that happen in pulses; anger spikes, emotional outbursts, breakthroughs, catharsis.
-- "orbitDrift": Orbit-like motion with slow drifting or precession; ongoing cycles that are gradually changing, long-term rumination, evolving habits, complex emotional loops.
-- "maze": Movement constrained to corridor-like paths with turns and dead ends; searching, confusion, problem-solving, feeling lost or trapped in complexity.
-
-
-RELATIONSHIP CONSTRAINTS (soft but important):
-
-Calm / meditative states:
-- If keywords include calm, serene, peaceful, meditative, tranquil:
-  - intensity MUST be <= 0.3
-  - pulsing SHOULD be <= 0.3
-  - avoid "outward", "inward", "burst", "jittery"
-  - prefer "circular", "breathing", "free", gentle "orbitDrift"
-
-Panic / anxiety:
-- If keywords include panic, terrified, frantic, overwhelmed (in a negative sense):
-  - intensity >= 0.7
-  - pulsing >= 0.8
-  - flowPattern in ["inward", "spiralInward", "jittery", "free", "maze"]
-  - coherence <= 0.4
-
-Deep, heavy sadness / grief:
-- If keywords include grief, heartbroken, devastated, profoundly sad:
-  - intensity 0.2–0.5
-  - flowDensity 0.2–0.4 (diffuse, heavy feeling)
-  - opacity 0.5–0.8
-  - prefer "down", "spiralInward", "maze" or slow "free" flows
-  - colors darker, cooler, or muted (deep blues, purples, grays)
-
-Joyful / euphoric:
-- If keywords include joy, ecstatic, elated, euphoric:
-  - intensity >= 0.
-  - pulsing 0.4–0.7
-  - coherence >= 0.6
-  - flowPattern in ["outward", "spiralOutward", "breathing", "flocking", "up"]
-  - bright, saturated colors
-
-GUIDANCE ABOUT EXAMPLES:
-- Use examples as *style and color* inspiration.
-- Keep numeric values consistent with the definitions and reasoning above, not as rigid templates.
-
-EXAMPLES (do NOT copy exactly, just use as inspiration):
-
-Deeply Serene/Meditative →
-{
-  "clarity": 0.9,
-  "intensity": 0.02,
-  "coherence": 0.95,
-  "stability": 0.98,
-  "density": 0.3,
-  "flowDensity": 0.55,
-  "sharpness": 0.2,
-  "quantity": 0.25,
-  "opacity": 0.75,
-  "pulsing": 0.05,
-  "speed": 0.15,
-  "noiseStrength": 0.3,
-  "noiseScale": 0.2,
-  "flowPattern": "circular",
-  "primaryColor": "#1a4d7a",
-  "secondaryColor": "#4d7a9a"
-}
-
-Calm/Peaceful →
-{
-  "clarity": 0.8,
-  "intensity": 0.15,
-  "coherence": 0.9,
-  "stability": 0.9,
-  "density": 0.5,
-  "flowDensity": 0.5,
-  "sharpness": 0.4,
-  "quantity": 0.45,
-  "opacity": 0.8,
-  "pulsing": 0.15,
-  "speed": 0.4,
-  "noiseStrength": 0.5,
-  "noiseScale": 0.3,
-  "flowPattern": "circular",
-  "primaryColor": "#6699cc",
-  "secondaryColor": "#99ccff"
-}
-
-Transcendent/Ethereal →
-{
-  "clarity": 0.85,
-  "intensity": 0.08,
-  "coherence": 0.9,
-  "stability": 0.95,
-  "density": 0.25,
-  "flowDensity": 0.6,
-  "sharpness": 0.3,
-  "quantity": 0.3,
-  "opacity": 0.65,
-  "pulsing": 0.2,
-  "speed": 0.25,
-  "noiseStrength": 0.4,
-  "noiseScale": 0.25,
-  "flowPattern": "free",
-  "primaryColor": "#4d0099",
-  "secondaryColor": "#cc99ff"
-}
-
-Joyful/Uplifting →
-{
-  "clarity": 0.75,
-  "intensity": 0.7,
-  "coherence": 0.75,
-  "stability": 0.7,
-  "density": 0.65,
-  "flowDensity": 0.55,
-  "sharpness": 0.6,
-  "quantity": 0.65,
-  "opacity": 0.85,
-  "pulsing": 0.35,
-  "flowPattern": "breathing",
-  "primaryColor": "#ffcc33",
-  "secondaryColor": "#ff99cc"
-}
-
-Energetic/Vibrant →
-{
-  "clarity": 0.7,
-  "intensity": 0.85,
-  "coherence": 0.6,
-  "stability": 0.5,
-  "density": 0.7,
-  "flowDensity": 0.5,
-  "sharpness": 0.6,
-  "quantity": 0.75,
-  "opacity": 0.9,
-  "pulsing": 0.5,
-  "speed": 3.5,
-  "noiseStrength": 3.8,
-  "noiseScale": 1.2,
-  "flowPattern": "spiralOutward",
-  "primaryColor": "#ff7700",
-  "secondaryColor": "#ffcc33"
-}
-
-Anxious/Nervous →
-{
-  "clarity": 0.2,
-  "intensity": 0.8,
-  "coherence": 0.4,
-  "stability": 0.1,
-  "density": 0.7,
-  "flowDensity": 0.25,
-  "sharpness": 0.4,
-  "quantity": 0.7,
-  "opacity": 0.7,
-  "pulsing": 0.95,
-  "speed": 4.2,
-  "noiseStrength": 3.5,
-  "noiseScale": 1.5,
-  "flowPattern": "spiralInward",
-  "primaryColor": "#6633cc",
-  "secondaryColor": "#cc3366"
-}
-
-Melancholic/Sad →
-{
-  "clarity": 0.55,
-  "intensity": 0.7,
-  "coherence": 0.65,
-  "stability": 0.55,
-  "density": 0.4,
-  "flowDensity": 0.3,
-  "sharpness": 0.3,
-  "quantity": 0.4,
-  "opacity": 0.6,
-  "pulsing": 0.4,
-  "flowPattern": "spiralInward",
-  "primaryColor": "#334466",
-  "secondaryColor": "#556688"
-}
-
-Confident/Bold →
-{
-  "clarity": 0.95,
-  "intensity": 0.75,
-  "coherence": 0.85,
-  "stability": 0.9,
-  "density": 0.8,
-  "flowDensity": 0.65,
-  "sharpness": 0.8,
-  "quantity": 0.7,
-  "opacity": 0.95,
-  "pulsing": 0.1,
-  "flowPattern": "outward",
-  "primaryColor": "#ffaa00",
-  "secondaryColor": "#ffffff"
-}
-
-Now, based on the input keywords, choose values that best match the emotional quality and return ONLY the JSON object.`;
-}
+OUTPUT FORMAT (repeat for emphasis):
+Return ONLY a single JSON object with ALL fields present and correctly typed.
+""")

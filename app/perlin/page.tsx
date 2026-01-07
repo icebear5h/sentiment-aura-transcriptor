@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import dynamic from "next/dynamic"
 import { ControlPanel } from "@/components/control-panel"
 import { TranscriptDisplay } from "@/components/transcript-display"
@@ -8,18 +8,21 @@ import { KeywordsDisplay } from "@/components/keywords-display"
 import { Controls } from "@/components/controls"
 import { AlertCircle } from "lucide-react"
 import { DeepgramClient } from "@/lib/deepgram"
-import { processText, withRetry } from "@/lib/api"
-import { BackendWebSocket, type StreamMessage } from "@/lib/backend-ws"
-import { translateKeywordsToParametersWithRetry } from "@/lib/groq-client"
+import type { ParameterMapping } from "@/lib/api"
 import type { SimulationParams, FlowPattern } from "@/lib/types"
+import { keywordsStore } from "@/lib/keywords-store"
+import { useParameterAnimation } from "@/hooks/useParameterAnimation"
+import { useTranscriptHandler } from "@/hooks/useTranscriptHandler"
+import { useDeepgramConnection } from "@/hooks/useDeepgramConnection"
+import { useKeywordManagement } from "@/hooks/useKeywordManagement"
 
 // Dynamically import Three.js components with no SSR
-const Canvas = dynamic(() => import("@react-three/fiber").then((mod) => mod.Canvas), { 
+const Canvas = dynamic(() => import("@react-three/fiber").then((mod) => mod.Canvas), {
   ssr: false,
   loading: () => <div className="w-full h-full bg-black" />
 })
-const PerlinNoiseParticles = dynamic(() => import("@/components/perlin-noise-particles").then((mod) => mod.PerlinNoiseParticles), { 
-  ssr: false 
+const PerlinNoiseParticles = dynamic(() => import("@/components/perlin-noise-particles").then((mod) => mod.PerlinNoiseParticles), {
+  ssr: false
 })
 
 interface KeywordWithTimestamp {
@@ -27,22 +30,18 @@ interface KeywordWithTimestamp {
   timestamp: number
 }
 
-const KEYWORD_DECAY_TIME = 50000 // 50 seconds
-
 // Toggle between mock and real mode
 const USE_REAL_APIS = process.env.NEXT_PUBLIC_DEEPGRAM_API_KEY ? true : false
-const USE_FASTAPI_BACKEND = process.env.NEXT_PUBLIC_USE_FASTAPI === 'true'
 
 export default function VisualRecordPage() {
   // Simulation params for Perlin Noise Particles
   const [params, setParams] = useState<SimulationParams>({
-    // Direct simulation parameters
     particleCount: 2000,
     particleSize: 0.02,
     brightness: 0.8,
     speed: 0.4,
     timeScale: 0.3,
-    transitionSpeed: 1.0,
+    transitionSpeed: 0.75,
     pulse: 0.75,
     noiseScale: 0.5,
     noiseStrength: 0.5,
@@ -52,8 +51,6 @@ export default function VisualRecordPage() {
     secondaryColor: "#ff00ff",
     backgroundColor: "#0a0a0a",
     showVectorField: false,
-    
-    // Legacy compatibility parameters
     opacity: 0.8,
     flowPattern: "free",
     clarity: 0.5,
@@ -77,356 +74,200 @@ export default function VisualRecordPage() {
   const [error, setError] = useState<string | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
   const [connectionStatus, setConnectionStatus] = useState<"disconnected" | "connecting" | "connected" | "error">("disconnected")
+
   const deepgramClientRef = useRef<DeepgramClient | null>(null)
-  const backendWsRef = useRef<BackendWebSocket | null>(null)
   const processingQueueRef = useRef<Set<string>>(new Set())
-  const streamingContentRef = useRef<string>("")
-  const backendThrottleRef = useRef<NodeJS.Timeout | null>(null)
-  const pendingTranscriptRef = useRef<string>("")
-  const groqThrottleRef = useRef<NodeJS.Timeout | null>(null)
-  const lastGroqCallRef = useRef<number>(0)
-  const lastProcessedKeywordCount = useRef<number>(0)
-  const groqTrailingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-  const groqInFlightRef = useRef(false)
   const destroyedRef = useRef(false)
-  const latestKeywordsRef = useRef<string[]>([])
-  const latestTranscriptRef = useRef<string[]>([])
-  const simulationIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const paramsRef = useRef<SimulationParams>(params)
+
+  // Animation refs
   const pulseTimeRef = useRef(0)
   const clarityBaseRef = useRef(0.5)
   const intensityBaseRef = useRef(0.5)
   const coherenceBaseRef = useRef(0.5)
-  const pulsingAmplitudeRef = useRef(0.75) // Controls pulsing intensity (0-1)
-  
-  // Color transition refs (initialize with starting state colors)
+  const pulsingAmplitudeRef = useRef(0.75)
+
   const currentPrimaryColorRef = useRef("#00ffff")
   const currentSecondaryColorRef = useRef("#ff00ff")
   const targetPrimaryColorRef = useRef("#00ffff")
   const targetSecondaryColorRef = useRef("#ff00ff")
-  const colorTransitionProgressRef = useRef(1.0) // 1.0 = transition complete
-  const colorTransitionDuration = 4.0 // seconds
+  const colorTransitionProgressRef = useRef(1.0)
 
-  // Particle count and size transition refs
   const currentParticleCountRef = useRef(2000)
   const targetParticleCountRef = useRef(2000)
   const currentParticleSizeRef = useRef(0.02)
   const targetParticleSizeRef = useRef(0.02)
   const particleTransitionProgressRef = useRef(1.0)
-  const particleTransitionDuration = 3.0 // seconds
 
-  // Helper function to interpolate between two hex colors
-  const interpolateColor = (color1: string, color2: string, t: number): string => {
-    const c1 = parseInt(color1.substring(1), 16)
-    const c2 = parseInt(color2.substring(1), 16)
-    
-    const r1 = (c1 >> 16) & 0xff
-    const g1 = (c1 >> 8) & 0xff
-    const b1 = c1 & 0xff
-    
-    const r2 = (c2 >> 16) & 0xff
-    const g2 = (c2 >> 8) & 0xff
-    const b2 = c2 & 0xff
-    
-    const r = Math.round(r1 + (r2 - r1) * t)
-    const g = Math.round(g1 + (g2 - g1) * t)
-    const b = Math.round(b1 + (b2 - b1) * t)
-    
-    return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`
-  }
+  // Numeric parameter transition refs - each ref defined separately for stability
+  const brightnessCurrentRef = useRef(0.8)
+  const brightnessTargetRef = useRef(0.8)
+  const speedCurrentRef = useRef(0.4)
+  const speedTargetRef = useRef(0.4)
+  const timeScaleCurrentRef = useRef(0.3)
+  const timeScaleTargetRef = useRef(0.3)
+  const pulseCurrentRef = useRef(0.75)
+  const pulseTargetRef = useRef(0.75)
+  const noiseScaleCurrentRef = useRef(0.5)
+  const noiseScaleTargetRef = useRef(0.5)
+  const noiseStrengthCurrentRef = useRef(0.5)
+  const noiseStrengthTargetRef = useRef(0.5)
+  const flowDensityCurrentRef = useRef(0.4)
+  const flowDensityTargetRef = useRef(0.4)
+  const turbulenceCurrentRef = useRef(0.15)
+  const turbulenceTargetRef = useRef(0.15)
+  const opacityCurrentRef = useRef(0.8)
+  const opacityTargetRef = useRef(0.8)
+  
+  const numericParams = useMemo(() => ({
+    brightness: { current: brightnessCurrentRef, target: brightnessTargetRef },
+    speed: { current: speedCurrentRef, target: speedTargetRef },
+    timeScale: { current: timeScaleCurrentRef, target: timeScaleTargetRef },
+    pulse: { current: pulseCurrentRef, target: pulseTargetRef },
+    noiseScale: { current: noiseScaleCurrentRef, target: noiseScaleTargetRef },
+    noiseStrength: { current: noiseStrengthCurrentRef, target: noiseStrengthTargetRef },
+    flowDensity: { current: flowDensityCurrentRef, target: flowDensityTargetRef },
+    turbulence: { current: turbulenceCurrentRef, target: turbulenceTargetRef },
+    opacity: { current: opacityCurrentRef, target: opacityTargetRef },
+  }), [])
+  const numericTransitionProgressRef = useRef(1.0)
+  const transitionDurationRef = useRef(0.75)
 
-  // Helper function to interpolate between two numbers
-  const interpolateNumber = (start: number, end: number, t: number): number => {
-    return start + (end - start) * t
-  }
+  const applyParameterMapping = useCallback((mapping: ParameterMapping) => {
+    const currentParams = paramsRef.current
 
-  // Pulsing effect for turbulence, noise strength, clarity, and color transitions
-  useEffect(() => {
-    let frameCount = 0
-    const animate = () => {
-      pulseTimeRef.current += 0.016 // ~60fps
-      frameCount++
-      
-      // Get pulsing amplitude (0-1 controls oscillation strength)
-      const pulsingAmp = pulsingAmplitudeRef.current
-      
-      // Handle color transitions
-      if (colorTransitionProgressRef.current < 1.0) {
-        colorTransitionProgressRef.current = Math.min(1.0, colorTransitionProgressRef.current + 0.016 / colorTransitionDuration)
-        
-        // Ease-in-out function for smooth transition
-        const t = colorTransitionProgressRef.current
-        const easedT = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t
-        
-        // Interpolate colors
-        const interpolatedPrimary = interpolateColor(
-          currentPrimaryColorRef.current,
-          targetPrimaryColorRef.current,
-          easedT
-        )
-        const interpolatedSecondary = interpolateColor(
-          currentSecondaryColorRef.current,
-          targetSecondaryColorRef.current,
-          easedT
-        )
-        
-        
-        // Update params with interpolated colors
-        setParams(prev => {
-          // Only update if colors actually changed
-          if (prev.primaryColor !== interpolatedPrimary || prev.secondaryColor !== interpolatedSecondary) {
-            return {
-              ...prev,
-              primaryColor: interpolatedPrimary,
-              secondaryColor: interpolatedSecondary
-            }
-          }
-          return prev
-        })
-        
-        // When transition completes, lock in the target colors
-        if (colorTransitionProgressRef.current >= 1.0) {
-          currentPrimaryColorRef.current = targetPrimaryColorRef.current
-          currentSecondaryColorRef.current = targetSecondaryColorRef.current
-          console.log('🎨 Color transition complete:', {
-            primary: currentPrimaryColorRef.current,
-            secondary: currentSecondaryColorRef.current
-          })
-        }
-      }
-      
-      // Handle particle count and size transitions
-      if (particleTransitionProgressRef.current < 1.0) {
-        particleTransitionProgressRef.current = Math.min(1.0, particleTransitionProgressRef.current + 0.016 / particleTransitionDuration)
-        
-        // Ease-in-out function for smooth transition
-        const t = particleTransitionProgressRef.current
-        const easedT = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t
-        
-        // Interpolate particle count and size
-        const interpolatedCount = Math.round(interpolateNumber(
-          currentParticleCountRef.current,
-          targetParticleCountRef.current,
-          easedT
-        ))
-        const interpolatedSize = interpolateNumber(
-          currentParticleSizeRef.current,
-          targetParticleSizeRef.current,
-          easedT
-        )
-        
-        // Update params with interpolated values
-        setParams(prev => {
-          // Only update if values actually changed
-          if (prev.particleCount !== interpolatedCount || Math.abs(prev.particleSize - interpolatedSize) > 0.001) {
-            return {
-              ...prev,
-              particleCount: interpolatedCount,
-              particleSize: interpolatedSize
-            }
-          }
-          return prev
-        })
-        
-        // When transition completes, lock in the target values
-        if (particleTransitionProgressRef.current >= 1.0) {
-          currentParticleCountRef.current = targetParticleCountRef.current
-          currentParticleSizeRef.current = targetParticleSizeRef.current
-          console.log('🔢 Particle transition complete:', {
-            count: currentParticleCountRef.current,
-            size: currentParticleSizeRef.current
-          })
-        }
-      }
-      
-      // Debug log every 5 seconds (300 frames at 60fps)
-      if (frameCount % 300 === 0) {
-        console.log('🌊 Animation state:', {
-          pulsingAmplitude: pulsingAmp,
-          clarityBase: clarityBaseRef.current,
-          intensityBase: intensityBaseRef.current,
-          coherenceBase: coherenceBaseRef.current,
-          colorTransitionProgress: colorTransitionProgressRef.current.toFixed(2),
-          currentColors: [currentPrimaryColorRef.current, currentSecondaryColorRef.current],
-          targetColors: [targetPrimaryColorRef.current, targetSecondaryColorRef.current],
-          isColorTransitioning: colorTransitionProgressRef.current < 1.0,
-          particleTransitionProgress: particleTransitionProgressRef.current.toFixed(2),
-          currentParticleCount: currentParticleCountRef.current,
-          targetParticleCount: targetParticleCountRef.current,
-          currentParticleSize: currentParticleSizeRef.current.toFixed(4),
-          targetParticleSize: targetParticleSizeRef.current.toFixed(4),
-          isParticleTransitioning: particleTransitionProgressRef.current < 1.0
-        })
-      }
-      
-      // Pulse qualitative parameters (matching three-fiber-playground approach)
-      // Let perlin-noise-particles.tsx handle mapping to technical parameters
-      
-      // Clarity pulsing - 0.25-0.75 sine wave, blended with base
-      const clarityPulse = Math.sin(pulseTimeRef.current * 2.0) * 0.25 + 0.5
-      const clarityValue = clarityBaseRef.current * 0.5 + clarityPulse * 0.5
-      
-      // Intensity pulsing - subtle variation around
-      
-      
-      setParams((prev) => ({
+    clarityBaseRef.current = mapping.clarity ?? 0.7
+    intensityBaseRef.current = mapping.intensity ?? 0.6
+    coherenceBaseRef.current = mapping.coherence ?? 0.7
+    pulsingAmplitudeRef.current = mapping.pulse ?? mapping.pulsing ?? 0.75
+
+    if (mapping.primaryColor !== targetPrimaryColorRef.current ||
+        mapping.secondaryColor !== targetSecondaryColorRef.current) {
+      currentPrimaryColorRef.current = currentParams.primaryColor
+      currentSecondaryColorRef.current = currentParams.secondaryColor
+      targetPrimaryColorRef.current = mapping.primaryColor
+      targetSecondaryColorRef.current = mapping.secondaryColor
+      colorTransitionProgressRef.current = 0.0
+    }
+
+    if (mapping.particleCount !== targetParticleCountRef.current ||
+        Math.abs(mapping.particleSize - targetParticleSizeRef.current) > 0.001) {
+      currentParticleCountRef.current = currentParams.particleCount
+      currentParticleSizeRef.current = currentParams.particleSize
+      targetParticleCountRef.current = mapping.particleCount
+      targetParticleSizeRef.current = mapping.particleSize
+      particleTransitionProgressRef.current = 0.0
+    }
+
+    // Set up numeric parameter transitions
+    numericParams.brightness.current.current = currentParams.brightness
+    numericParams.brightness.target.current = mapping.brightness
+    numericParams.speed.current.current = currentParams.speed
+    numericParams.speed.target.current = mapping.speed
+    numericParams.timeScale.current.current = currentParams.timeScale
+    numericParams.timeScale.target.current = mapping.timeScale
+    numericParams.pulse.current.current = currentParams.pulse
+    numericParams.pulse.target.current = mapping.pulse
+    numericParams.noiseScale.current.current = currentParams.noiseScale
+    numericParams.noiseScale.target.current = mapping.noiseScale
+    numericParams.noiseStrength.current.current = currentParams.noiseStrength
+    numericParams.noiseStrength.target.current = mapping.noiseStrength
+    numericParams.flowDensity.current.current = currentParams.flowDensity
+    numericParams.flowDensity.target.current = mapping.flowDensity
+    numericParams.turbulence.current.current = currentParams.turbulence
+    numericParams.turbulence.target.current = mapping.turbulence
+    numericParams.opacity.current.current = currentParams.opacity ?? 0.8
+    numericParams.opacity.target.current = mapping.opacity ?? 0.8
+    
+    // Set transition duration and trigger transition
+    transitionDurationRef.current = mapping.transitionSpeed
+    numericTransitionProgressRef.current = 0.0
+    console.log('[applyParameterMapping] Triggered numeric transition, duration:', mapping.transitionSpeed)
+
+    // Only set non-transitioning params immediately
+    setParams(prev => {
+      const updated = {
         ...prev,
-        clarity: clarityValue,
-      }))
-      
-      requestAnimationFrame(animate)
-    }
-    
-    const animationId = requestAnimationFrame(animate)
-    return () => cancelAnimationFrame(animationId)
+        transitionSpeed: mapping.transitionSpeed,
+        flowPattern: mapping.flowPattern as FlowPattern,
+        stability: mapping.stability ?? prev.stability,
+        sharpness: mapping.sharpness ?? prev.sharpness,
+        quantity: mapping.quantity ?? prev.quantity,
+        pulsing: mapping.pulsing ?? mapping.pulse ?? prev.pulsing,
+      }
+      paramsRef.current = updated
+      return updated
+    })
+
+    // Colors will be transitioned by useParameterAnimation - don't set immediately
+
+    const pulsingValue = mapping.pulse ?? mapping.pulsing ?? 0.75
+    const pulsingLevel = pulsingValue < 0.3 ? 'minimal' : pulsingValue < 0.6 ? 'moderate' : 'strong'
+    const description = `Speed: ${mapping.speed.toFixed(1)} | Pulsing: ${pulsingLevel} (${(pulsingValue * 100).toFixed(0)}%) | Turbulence: ${mapping.turbulence.toFixed(2)} | NoiseStrength: ${mapping.noiseStrength.toFixed(2)} | Pattern: ${mapping.flowPattern ?? 'free'} | Colors: ${mapping.primaryColor} → ${mapping.secondaryColor}`
+    setParameterDescription(description)
+
+    console.log('[OK] Applied backend parameters:', mapping)
   }, [])
 
-  // Simulation keyword pools organized by emotion - Rich variety for testing
-  const emotionKeywordPools = {
-    // Calm & Peace
-    calm: ['peaceful', 'serene', 'tranquil', 'gentle', 'soft', 'quiet', 'still', 'relaxed', 'calm', 'soothing', 'mellow', 'placid'],
-    meditative: ['contemplative', 'reflective', 'mindful', 'centered', 'balanced', 'focused', 'present', 'aware', 'grounded'],
-    
-    // Energy & Excitement
-    energetic: ['vibrant', 'dynamic', 'energetic', 'lively', 'spirited', 'electric', 'intense', 'powerful', 'active', 'vigorous'],
-    excited: ['thrilled', 'exhilarated', 'animated', 'enthusiastic', 'eager', 'zealous', 'pumped', 'hyped', 'stimulated'],
-    euphoric: ['euphoric', 'ecstatic', 'elated', 'rapturous', 'overjoyed', 'exultant', 'jubilant', 'triumphant', 'blissful'],
-    
-    // Chaos & Disorder
-    chaotic: ['turbulent', 'chaotic', 'frantic', 'wild', 'unstable', 'erratic', 'volatile', 'scattered', 'hectic', 'confused', 'disoriented'],
-    frantic: ['frenzied', 'manic', 'feverish', 'desperate', 'panicked', 'rushed', 'harried', 'agitated', 'flustered'],
-    
-    // Joy & Happiness
-    happy: ['joyful', 'happy', 'cheerful', 'bright', 'radiant', 'delighted', 'blissful', 'uplifting', 'pleasant', 'gleeful'],
-    playful: ['playful', 'whimsical', 'lighthearted', 'mischievous', 'spirited', 'fun', 'amusing', 'entertaining', 'jovial'],
-    
-    // Sadness & Melancholy
-    sad: ['melancholy', 'somber', 'wistful', 'pensive', 'subdued', 'muted', 'sad', 'gloomy', 'heavy', 'sorrowful'],
-    melancholic: ['melancholic', 'mournful', 'elegiac', 'plaintive', 'doleful', 'lugubrious', 'wistful', 'nostalgic', 'yearning'],
-    despairing: ['despairing', 'hopeless', 'desolate', 'forlorn', 'dejected', 'disheartened', 'disconsolate', 'woeful'],
-    
-    // Anxiety & Fear
-    anxious: ['anxious', 'tense', 'nervous', 'uneasy', 'restless', 'agitated', 'jittery', 'worried', 'uncertain', 'uncomfortable'],
-    fearful: ['fearful', 'apprehensive', 'dreadful', 'terrified', 'alarmed', 'intimidated', 'timid', 'tremulous', 'scared'],
-    
-    // Anger & Aggression
-    angry: ['angry', 'furious', 'irate', 'enraged', 'livid', 'incensed', 'wrathful', 'indignant', 'hostile', 'fierce'],
-    irritated: ['irritated', 'annoyed', 'vexed', 'aggravated', 'exasperated', 'frustrated', 'perturbed', 'irked'],
-    
-    // Mystery & Wonder
-    mysterious: ['mysterious', 'enigmatic', 'ethereal', 'cosmic', 'dreamy', 'surreal', 'otherworldly', 'mystical', 'strange', 'ambiguous'],
-    awe: ['awestruck', 'amazed', 'wonderstruck', 'astonished', 'dazzled', 'stupefied', 'spellbound', 'entranced'],
-    
-    // Confidence & Strength
-    confident: ['confident', 'certain', 'clear', 'assured', 'bold', 'strong', 'decisive', 'firm', 'resolute', 'determined'],
-    powerful: ['powerful', 'mighty', 'formidable', 'commanding', 'authoritative', 'dominant', 'imposing', 'robust'],
-    
-    // Love & Warmth
-    warm: ['warm', 'cozy', 'comfortable', 'inviting', 'tender', 'affectionate', 'loving', 'caring', 'nurturing', 'compassionate'],
-    romantic: ['romantic', 'passionate', 'ardent', 'amorous', 'enamored', 'devoted', 'intimate', 'fervent', 'swooning'],
-    
-    // Cold & Distance
-    cold: ['cold', 'distant', 'detached', 'aloof', 'remote', 'impersonal', 'frigid', 'icy', 'indifferent', 'withdrawn'],
-    lonely: ['lonely', 'isolated', 'solitary', 'abandoned', 'forsaken', 'estranged', 'disconnected', 'alienated'],
-    
-    // Hope & Optimism
-    hopeful: ['hopeful', 'optimistic', 'promising', 'encouraging', 'uplifting', 'inspiring', 'heartening', 'buoyant'],
-    
-    // Nostalgia & Memory
-    nostalgic: ['nostalgic', 'wistful', 'reminiscent', 'sentimental', 'bittersweet', 'longing', 'remembering', 'evocative'],
-    
-    // Solemn & Serious
-    solemn: ['solemn', 'grave', 'serious', 'austere', 'dignified', 'formal', 'ceremonial', 'reverent', 'somber'],
-    
-    // Curious & Inquisitive
-    curious: ['curious', 'inquisitive', 'intrigued', 'fascinated', 'interested', 'exploring', 'wondering', 'questioning']
-  }
+  // Custom hooks
+  useParameterAnimation(setParams, {
+    pulseTimeRef,
+    clarityBaseRef,
+    intensityBaseRef,
+    coherenceBaseRef,
+    pulsingAmplitudeRef,
+    currentPrimaryColorRef,
+    currentSecondaryColorRef,
+    targetPrimaryColorRef,
+    targetSecondaryColorRef,
+    colorTransitionProgressRef,
+    currentParticleCountRef,
+    targetParticleCountRef,
+    currentParticleSizeRef,
+    targetParticleSizeRef,
+    particleTransitionProgressRef,
+    numericParams,
+    numericTransitionProgressRef,
+    transitionDurationRef,
+  })
 
-  // Backend already extracts only emotional/qualia keywords
-  // No filtering needed on frontend
+  const { handleTranscript, cleanup: cleanupTranscriptHandler } = useTranscriptHandler({
+    setTranscript,
+    setIsProcessing,
+    setError,
+    setSentiment,
+    setSentimentType,
+    setKeywordsWithTimestamp,
+    setKeywords,
+    applyParameterMapping,
+    processingQueueRef,
+  })
 
-  // Simulation mode - generates keywords periodically
-  useEffect(() => {
-    if (!isSimulating) {
-      if (simulationIntervalRef.current) {
-        clearInterval(simulationIntervalRef.current)
-      }
-      return
-    }
+  const { startDeepgramClient, stopDeepgramClient } = useDeepgramConnection({
+    setConnectionStatus,
+    setError,
+    onTranscript: handleTranscript,
+    onError: (err) => {
+      console.error('[ERROR] Deepgram error:', err)
+    },
+  })
 
-    let emotionIndex = 0
-    const emotions = Object.keys(emotionKeywordPools) as Array<keyof typeof emotionKeywordPools>
-    
-    // Add keywords every 20 seconds
-    simulationIntervalRef.current = setInterval(() => {
-      const currentEmotion = emotions[emotionIndex % emotions.length]
-      const pool = emotionKeywordPools[currentEmotion]
-      
-      // Pick 2-4 random keywords from the pool
-      const count = Math.floor(Math.random() * 3) + 2
-      const shuffled = [...pool].sort(() => Math.random() - 0.5)
-      const selectedKeywords = shuffled.slice(0, count)
-      
-      const now = Date.now()
-      const newKeywordsWithTimestamp = selectedKeywords.map((kw: string) => ({
-        keyword: kw,
-        timestamp: now
-      }))
-      
-      console.log(`🎭 Simulation: Adding ${currentEmotion} keywords:`, selectedKeywords)
-      console.log(`📊 Total keywords before add: ${keywords.length}, after will be: ${keywords.length + selectedKeywords.length}`)
-      
-      setKeywordsWithTimestamp(prev => [...prev, ...newKeywordsWithTimestamp])
-      setKeywords(prev => {
-        const updated = [...prev, ...selectedKeywords]
-        console.log(`✅ Keywords state updated: ${updated.length} total keywords`)
-        return updated
-      })
-      
-      emotionIndex++
-    }, 10000) // Generate new keywords every 10 seconds
-
-    return () => {
-      if (simulationIntervalRef.current) {
-        clearInterval(simulationIntervalRef.current)
-      }
-    }
-  }, [isSimulating])
-
-  // Keyword decay mechanism - removes keywords older than 50 seconds
-  useEffect(() => {
-    const decayInterval = setInterval(() => {
-      const now = Date.now()
-      setKeywordsWithTimestamp(prev => {
-        const filtered = prev.filter(kw => now - kw.timestamp < KEYWORD_DECAY_TIME)
-        if (filtered.length !== prev.length) {
-          setKeywords(filtered.map(kw => kw.keyword))
-        }
-        return filtered
-      })
-    }, 5000) // Check every 5 seconds
-
-    return () => clearInterval(decayInterval)
-  }, [])
+  useKeywordManagement({
+    isSimulating,
+    setKeywordsWithTimestamp,
+    setKeywords,
+  })
 
   useEffect(() => {
-    latestKeywordsRef.current = keywords
-  }, [keywords])
+    paramsRef.current = params
+  }, [params])
 
-  useEffect(() => {
-    latestTranscriptRef.current = transcript
-  }, [transcript])
-
-  // CRITICAL: Master cleanup when component unmounts (navigating away)
+  // Master cleanup on unmount
   useEffect(() => {
     return () => {
       destroyedRef.current = true
-      if (groqTrailingTimeoutRef.current) {
-        clearTimeout(groqTrailingTimeoutRef.current)
-        groqTrailingTimeoutRef.current = null
-      }
-      console.log('🧹 Visual Record page unmounting - cleaning up all resources')
-      
-      // Stop recording if active
+      console.log('[CLEANUP] Visual Record page unmounting - cleaning up all resources')
+
       if (deepgramClientRef.current) {
         try {
           deepgramClientRef.current.stop()
@@ -435,253 +276,18 @@ export default function VisualRecordPage() {
         }
         deepgramClientRef.current = null
       }
-      
-      // Close backend WebSocket
-      if (backendWsRef.current) {
-        try {
-          backendWsRef.current.close()
-        } catch (e) {
-          console.error('Error closing backend WS:', e)
-        }
-        backendWsRef.current = null
-      }
-      
-      // Clear all timeouts and intervals
-      if (backendThrottleRef.current) {
-        clearTimeout(backendThrottleRef.current)
-        backendThrottleRef.current = null
-      }
-      
-      if (simulationIntervalRef.current) {
-        clearInterval(simulationIntervalRef.current)
-        simulationIntervalRef.current = null
-      }
-      
-      // Clear processing queue
+
+      cleanupTranscriptHandler()
       processingQueueRef.current.clear()
-      
-      console.log('✅ All resources cleaned up')
+
+      console.log('[OK] All resources cleaned up')
     }
-  }, [])
-
-  // Call Groq to translate keywords to parameters
-  // Backend extracts emotional/qualia keywords → Send NEW keywords to Frontend Groq for parameter translation
-  useEffect(() => {
-    console.log(`🔄 Keywords effect triggered. Total keywords: ${keywords.length}, Last processed: ${lastProcessedKeywordCount.current}`)
-    
-    if (keywords.length === 0) {
-      lastProcessedKeywordCount.current = 0
-      console.log('⏸️ No keywords, skipping processing')
-      return
-    }
-
-    const newKeywordCount = keywords.length - lastProcessedKeywordCount.current
-    console.log(`📈 New keyword count: ${newKeywordCount}`)
-    if (newKeywordCount === 0) {
-      console.log('⏸️ No new keywords since last processing')
-      return
-    }
-
-    const COOLDOWN_MS = 10000
-    const now = Date.now()
-    const cooldownRemaining = COOLDOWN_MS - (now - lastGroqCallRef.current)
-
-    const processGroq = async () => {
-      if (groqInFlightRef.current) return
-      groqInFlightRef.current = true
-      try {
-        const newKeywords = latestKeywordsRef.current.slice(lastProcessedKeywordCount.current)
-        const uniqueNewKeywords = Array.from(new Set(newKeywords))
-        console.log(`📥 New keywords (${uniqueNewKeywords.length}):`, uniqueNewKeywords)
-        if (uniqueNewKeywords.length < 1) return
-
-        console.log('🤖 Translating NEW keywords to parameters:', uniqueNewKeywords)
-        const fullTranscriptText = latestTranscriptRef.current.join(' ')
-        const mapping = await translateKeywordsToParametersWithRetry(uniqueNewKeywords, fullTranscriptText)
-
-        lastProcessedKeywordCount.current = latestKeywordsRef.current.length
-
-        if (destroyedRef.current) {
-          console.log('⚠️ Component unmounted, skipping state updates')
-          return
-        }
-
-        lastGroqCallRef.current = Date.now()
-
-        clarityBaseRef.current = mapping.clarity ?? 0.7
-        intensityBaseRef.current = mapping.intensity ?? 0.6
-        coherenceBaseRef.current = mapping.coherence ?? 0.7
-        pulsingAmplitudeRef.current = mapping.pulse ?? mapping.pulsing ?? 0.75
-
-        console.log('🌊 Qualitative pulsing updated:', {
-          pulse: mapping.pulse,
-          pulsing: mapping.pulsing,
-          pulsingAmplitude: mapping.pulse ?? mapping.pulsing ?? 0.75,
-          clarityBase: mapping.clarity,
-          intensityBase: mapping.intensity,
-          coherenceBase: mapping.coherence
-        })
-
-        console.log('🔍 Checking color change:', {
-          newPrimary: mapping.primaryColor,
-          targetPrimary: targetPrimaryColorRef.current,
-          newSecondary: mapping.secondaryColor,
-          targetSecondary: targetSecondaryColorRef.current,
-          isDifferent: mapping.primaryColor !== targetPrimaryColorRef.current || 
-                      mapping.secondaryColor !== targetSecondaryColorRef.current
-        })
-
-        if (mapping.primaryColor !== targetPrimaryColorRef.current || 
-            mapping.secondaryColor !== targetSecondaryColorRef.current) {
-          currentPrimaryColorRef.current = params.primaryColor
-          currentSecondaryColorRef.current = params.secondaryColor
-          targetPrimaryColorRef.current = mapping.primaryColor
-          targetSecondaryColorRef.current = mapping.secondaryColor
-          colorTransitionProgressRef.current = 0.0
-          console.log('🎨 Starting color transition:', {
-            from: [currentPrimaryColorRef.current, currentSecondaryColorRef.current],
-            to: [targetPrimaryColorRef.current, targetSecondaryColorRef.current],
-            duration: `${colorTransitionDuration}s`,
-            progress: colorTransitionProgressRef.current
-          })
-        } else {
-          console.log('⏭️ Colors unchanged, skipping transition')
-        }
-
-        if (mapping.particleCount !== targetParticleCountRef.current || 
-            Math.abs(mapping.particleSize - targetParticleSizeRef.current) > 0.001) {
-          currentParticleCountRef.current = params.particleCount
-          currentParticleSizeRef.current = params.particleSize
-          targetParticleCountRef.current = mapping.particleCount
-          targetParticleSizeRef.current = mapping.particleSize
-          particleTransitionProgressRef.current = 0.0
-          console.log('🔢 Starting particle transition:', {
-            fromCount: currentParticleCountRef.current,
-            toCount: targetParticleCountRef.current,
-            fromSize: currentParticleSizeRef.current.toFixed(4),
-            toSize: targetParticleSizeRef.current.toFixed(4),
-            duration: `${particleTransitionDuration}s`,
-            progress: particleTransitionProgressRef.current
-          })
-        } else {
-          console.log('⏭️ Particles unchanged, skipping transition')
-        }
-
-        setParams(prev => ({
-          ...prev,
-          brightness: mapping.brightness,
-          speed: mapping.speed,
-          timeScale: mapping.timeScale,
-          transitionSpeed: mapping.transitionSpeed,
-          pulse: mapping.pulse,
-          noiseScale: mapping.noiseScale,
-          noiseStrength: mapping.noiseStrength,
-          flowDensity: mapping.flowDensity,
-          turbulence: mapping.turbulence,
-          flowPattern: mapping.flowPattern as FlowPattern,
-          stability: mapping.stability ?? 0.5,
-          sharpness: mapping.sharpness ?? 0.5,
-          quantity: mapping.quantity ?? 0.5,
-          opacity: mapping.opacity ?? 0.8,
-          pulsing: mapping.pulsing ?? 0.75,
-        }))
-
-        if (colorTransitionProgressRef.current === 0.0) {
-          setParams(prev => ({
-            ...prev,
-            primaryColor: currentPrimaryColorRef.current,
-            secondaryColor: currentSecondaryColorRef.current
-          }))
-          console.log('🎨 Set initial transition colors:', {
-            primary: currentPrimaryColorRef.current,
-            secondary: currentSecondaryColorRef.current
-          })
-        }
-
-        const pulsingValue = mapping.pulse ?? mapping.pulsing ?? 0.75
-        const pulsingLevel = pulsingValue < 0.3 ? 'minimal' : pulsingValue < 0.6 ? 'moderate' : 'strong'
-        const description = `Speed: ${mapping.speed.toFixed(1)} | Pulsing: ${pulsingLevel} (${(pulsingValue * 100).toFixed(0)}%) | Turbulence: ${mapping.turbulence.toFixed(2)} | NoiseStrength: ${mapping.noiseStrength.toFixed(2)} | Pattern: ${mapping.flowPattern ?? 'free'} | Colors: ${mapping.primaryColor} → ${mapping.secondaryColor}`
-        setParameterDescription(description)
-
-        console.log('✅ Applied Groq parameters:', mapping)
-      } catch (err) {
-        console.error('❌ Failed to translate keywords (using fallback):', err)
-      } finally {
-        groqInFlightRef.current = false
-      }
-    }
-
-    if (cooldownRemaining <= 0) {
-      if (groqTrailingTimeoutRef.current) {
-        clearTimeout(groqTrailingTimeoutRef.current)
-        groqTrailingTimeoutRef.current = null
-      }
-      processGroq()
-    } else if (!groqTrailingTimeoutRef.current) {
-      console.log(`⏸️ Cooldown active (${(cooldownRemaining / 1000).toFixed(1)}s remaining). Will run at end of window.`)
-      groqTrailingTimeoutRef.current = setTimeout(() => {
-        groqTrailingTimeoutRef.current = null
-        processGroq()
-      }, cooldownRemaining + 100)
-    }
-  }, [keywords])
-
-  // Sentiment values are still tracked but no longer directly control parameters
-  // Parameters are now controlled by Groq keyword translation only
-  // This prevents conflicts between sentiment-based and keyword-based parameter updates
+  }, [cleanupTranscriptHandler])
 
   const updateParam = <K extends keyof SimulationParams>(key: K, value: SimulationParams[K]) => {
     setParams((prev) => ({ ...prev, [key]: value }))
   }
-  /**
-   * Handle streamed LLM responses from backend
-   */
-  const handleBackendMessage = useCallback((message: any) => {
-    switch (message.type) {
-      case 'transcript_update':
-        console.log('📝 Backend buffer:', message.text)
-        break
-      
-      case 'result':
-        const { sentiment, sentiment_type, keywords, confidence } = message.data
-        setSentiment(sentiment)
-        setSentimentType(sentiment_type)
-        
-        // Backend already extracts only emotional/qualia keywords
-        console.log('📥 Received keywords from backend:', keywords)
-        
-        if (keywords.length > 0) {
-          // Add keywords with timestamps
-          const now = Date.now()
-          const newKeywordsWithTimestamp = keywords.map((kw: string) => ({
-            keyword: kw,
-            timestamp: now
-          }))
-          setKeywordsWithTimestamp(prev => [...prev, ...newKeywordsWithTimestamp])
-          setKeywords(prev => [...prev, ...keywords])
-        }
-        
-        setIsProcessing(false)
-        streamingContentRef.current = ""
-        setError(null)
-        console.log('✅ Received result:', message.data)
-        break
-      
-      case 'error':
-        setError(message.message)
-        setIsProcessing(false)
-        setTimeout(() => setError(null), 5000)
-        break
-      
-      case 'processing':
-        setIsProcessing(true)
-        break
-    }
-  }, [])
 
-  /**
-   * Real transcription with Deepgram + FastAPI streaming
-   */
   const startRealTranscription = useCallback(async () => {
     if (!process.env.NEXT_PUBLIC_DEEPGRAM_API_KEY) {
       setError('Deepgram API key not configured')
@@ -693,130 +299,22 @@ export default function VisualRecordPage() {
       setConnectionStatus('connecting')
       setError(null)
 
-      if (USE_FASTAPI_BACKEND) {
-        const backendWs = new BackendWebSocket(process.env.NEXT_PUBLIC_FASTAPI_URL || 'ws://localhost:8000/ws')
-        backendWsRef.current = backendWs
-        
-        backendWs.onMessage(handleBackendMessage)
-        backendWs.onConnectionChange((status) => {
-          console.log('Backend WebSocket status:', status)
-        })
-        
-        try {
-          await backendWs.connect()
-          console.log('✅ Connected to FastAPI backend')
-        } catch (err) {
-          console.warn('Failed to connect to FastAPI backend, using Next.js API routes')
-        }
-      }
-
-      const client = new DeepgramClient({
-        apiKey: process.env.NEXT_PUBLIC_DEEPGRAM_API_KEY,
-        model: 'nova-2',
-        language: 'en-US',
-        punctuate: true,
-        interim_results: true,
-      })
-
-      deepgramClientRef.current = client
-
-      client.onConnectionChange((status) => {
-        setConnectionStatus(status)
-      })
-
-      client.onTranscript(async (transcript) => {
-        if (!transcript.is_final) {
-          return
-        }
-
-        setTranscript((prev) => [...prev, transcript.text])
-
-        pendingTranscriptRef.current = pendingTranscriptRef.current 
-          ? pendingTranscriptRef.current + " " + transcript.text 
-          : transcript.text
-
-        if (backendThrottleRef.current) {
-          clearTimeout(backendThrottleRef.current)
-        }
-
-        backendThrottleRef.current = setTimeout(async () => {
-          const textToProcess = pendingTranscriptRef.current
-          
-          if (!textToProcess || textToProcess.trim().length < 3) {
-            return
-          }
-
-          if (processingQueueRef.current.has(textToProcess)) {
-            return
-          }
-          processingQueueRef.current.add(textToProcess)
-
-          setIsProcessing(true)
-          
-          try {
-            if (USE_FASTAPI_BACKEND && backendWsRef.current?.isConnected()) {
-              console.log('📤 Sending to FastAPI:', textToProcess.substring(0, 50) + '...')
-              backendWsRef.current.sendTranscript(textToProcess)
-              pendingTranscriptRef.current = ""
-            } else {
-              const result = await withRetry(() => processText(textToProcess), 2, 500)
-              setSentiment(result.sentiment)
-              setSentimentType(result.sentiment_type)
-              
-              // Backend already extracts only emotional/qualia keywords
-              console.log('📥 Received keywords from backend:', result.keywords)
-              
-              if (result.keywords.length > 0) {
-                // Add keywords with timestamps
-                const now = Date.now()
-                const newKeywordsWithTimestamp = result.keywords.map((kw: string) => ({
-                  keyword: kw,
-                  timestamp: now
-                }))
-                setKeywordsWithTimestamp(prev => [...prev, ...newKeywordsWithTimestamp])
-                setKeywords(prev => [...prev, ...result.keywords])
-              }
-              
-              setIsProcessing(false)
-              setError(null)
-              pendingTranscriptRef.current = ""
-            }
-          } catch (err) {
-            const errorMessage = err instanceof Error ? err.message : 'Failed to process text'
-            setError(`Processing error: ${errorMessage}`)
-            setTimeout(() => setError(null), 5000)
-            setIsProcessing(false)
-          } finally {
-            processingQueueRef.current.delete(textToProcess)
-          }
-        }, 1500)
-      })
-
-      client.onError((err) => {
-        setError(err.message)
-        setConnectionStatus('error')
-        setTimeout(() => setError(null), 5000)
-      })
-
-      await client.start()
+      await startDeepgramClient(deepgramClientRef)
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to start recording'
       setError(errorMessage)
       setConnectionStatus('error')
     }
-  }, [handleBackendMessage])
+  }, [startDeepgramClient])
 
-  /**
-   * Mock transcription for testing
-   */
   const simulateTranscription = useCallback(() => {
     setConnectionStatus("connecting")
     setError(null)
-    
+
     setTimeout(() => {
       setConnectionStatus("connected")
     }, 500)
-    
+
     const mockPhrases = [
       "I'm experiencing a profound sense of euphoria right now",
       "There's a gentle melancholy washing over me",
@@ -842,9 +340,9 @@ export default function VisualRecordPage() {
         setConnectionStatus("disconnected")
         return
       }
-      
+
       setIsProcessing(true)
-      
+
       if (Math.random() < 0.05) {
         setError("Temporary processing delay detected")
         setTimeout(() => setError(null), 3000)
@@ -873,9 +371,10 @@ export default function VisualRecordPage() {
 
       if (phraseIndex % 2 === 0) {
         const newKeywords = mockKeywordSets[keywordSetIndex % mockKeywordSets.length]
-        
-        // Mock keywords are already emotional/qualia words
+
         if (newKeywords.length > 0) {
+          keywordsStore.addKeywords(newKeywords)
+
           const now = Date.now()
           const newKeywordsWithTimestamp = newKeywords.map((kw: string) => ({
             keyword: kw,
@@ -886,7 +385,7 @@ export default function VisualRecordPage() {
         }
         keywordSetIndex++
       }
-      
+
       setTimeout(() => setIsProcessing(false), 300)
     }, 2500)
 
@@ -897,50 +396,32 @@ export default function VisualRecordPage() {
     }
   }, [isRecording])
 
+  // Effect for starting/stopping recording - only depends on isRecording
   useEffect(() => {
-    if (isRecording) {
-      if (USE_REAL_APIS) {
-        startRealTranscription()
-        return () => {
-          if (deepgramClientRef.current) {
-            deepgramClientRef.current.stop()
-            deepgramClientRef.current = null
-          }
-          if (backendWsRef.current) {
-            backendWsRef.current.close()
-            backendWsRef.current = null
-          }
-          if (backendThrottleRef.current) {
-            clearTimeout(backendThrottleRef.current)
-            backendThrottleRef.current = null
-          }
-          processingQueueRef.current.clear()
-          pendingTranscriptRef.current = ""
-        }
-      } else {
-        const cleanup = simulateTranscription()
-        return cleanup
-      }
+    if (!isRecording) {
+      return
     }
-  }, [isRecording, startRealTranscription, simulateTranscription])
+    
+    if (USE_REAL_APIS) {
+      startRealTranscription()
+      return () => {
+        stopDeepgramClient(deepgramClientRef)
+        cleanupTranscriptHandler()
+        processingQueueRef.current.clear()
+      }
+    } else {
+      const cleanup = simulateTranscription()
+      return cleanup
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRecording])
 
   const handleStartStop = useCallback(() => {
     if (isRecording) {
       if (USE_REAL_APIS) {
-        if (deepgramClientRef.current) {
-          deepgramClientRef.current.stop()
-          deepgramClientRef.current = null
-        }
-        if (backendWsRef.current) {
-          backendWsRef.current.close()
-          backendWsRef.current = null
-        }
-        if (backendThrottleRef.current) {
-          clearTimeout(backendThrottleRef.current)
-          backendThrottleRef.current = null
-        }
+        stopDeepgramClient(deepgramClientRef)
+        cleanupTranscriptHandler()
       }
-      pendingTranscriptRef.current = ""
       setIsRecording(false)
       setConnectionStatus("disconnected")
       setError(null)
@@ -948,13 +429,12 @@ export default function VisualRecordPage() {
       setTranscript([])
       setKeywords([])
       setKeywordsWithTimestamp([])
+      keywordsStore.clear()
       setSentiment(0.5)
       setSentimentType("neutral")
       setError(null)
       processingQueueRef.current.clear()
-      lastGroqCallRef.current = 0
-      lastProcessedKeywordCount.current = 0
-      
+
       try {
         setIsRecording(true)
       } catch (err) {
@@ -962,7 +442,7 @@ export default function VisualRecordPage() {
         setConnectionStatus("error")
       }
     }
-  }, [isRecording])
+  }, [isRecording, stopDeepgramClient, cleanupTranscriptHandler])
 
   return (
     <div className="relative w-full min-h-screen overflow-y-auto">
@@ -983,11 +463,6 @@ export default function VisualRecordPage() {
               {!USE_REAL_APIS && (
                 <span className="text-xs px-2 py-1 bg-yellow-500/20 border border-yellow-500/50 rounded text-yellow-300">
                   MOCK MODE
-                </span>
-              )}
-              {USE_REAL_APIS && USE_FASTAPI_BACKEND && (
-                <span className="text-xs px-2 py-1 bg-blue-500/20 border border-blue-500/50 rounded text-blue-300">
-                  STREAMING
                 </span>
               )}
               {connectionStatus === "connected" && (

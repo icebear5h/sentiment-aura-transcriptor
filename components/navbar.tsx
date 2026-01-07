@@ -1,13 +1,8 @@
-"use client"
-
 import Link from "next/link"
-import { useSession, signOut } from "next-auth/react"
 import { Button } from "@/components/ui/button"
-import { Brain, User, Sparkles, Waves, Heart } from "lucide-react"
+import { Brain, Sparkles } from "lucide-react"
 
 export function Navbar() {
-  const { data: session, status } = useSession()
-
   return (
     <nav className="fixed top-0 left-0 right-0 z-50 bg-black/20 backdrop-blur-xl border-b border-white/10">
       <div className="container mx-auto px-6 py-4">
@@ -20,30 +15,12 @@ export function Navbar() {
           </Link>
 
           <div className="flex items-center gap-4">
-            {status === "authenticated" && (
-              <>
-                <div className="flex items-center gap-2 text-white/60 text-sm">
-                  <User className="w-4 h-4" />
-                  <span>{session.user?.name || session.user?.email}</span>
-                </div>
-                <Button
-                  onClick={() => signOut({ callbackUrl: "/" })}
-                  className="bg-cyan-500 hover:bg-cyan-600 text-white"
-                >
-                  Sign Out
-                </Button>
-              </>
-            )}
-
-            {status === "unauthenticated" && (
-              <Link href="/auth/login">
-                <Button className="bg-cyan-500 hover:bg-cyan-600 text-white">Sign In</Button>
+            <Button asChild className="bg-cyan-500 hover:bg-cyan-600 text-white">
+              <Link href="/perlin">
+                <Sparkles className="w-4 h-4" />
+                Open Visualizer
               </Link>
-            )}
-
-            {status === "loading" && (
-              <div className="text-white/40 text-sm">Loading...</div>
-            )}
+            </Button>
           </div>
         </div>
       </div>

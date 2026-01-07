@@ -1,4 +1,12 @@
 {
-  "framework": "nextjs",
-  "regions": ["iad1"]
+  "regions": ["iad1"],
+  "builds": [
+    { "src": "package.json", "use": "@vercel/next" },
+    { "src": "src/index.py", "use": "@vercel/python" }
+  ],
+  "routes": [
+    { "src": "/process_text", "dest": "src/index.py" },
+    { "src": "/health", "dest": "src/index.py" },
+    { "src": "/(.*)", "dest": "/$1" }
+  ]
 }
